@@ -35,6 +35,7 @@ DEFAULT_PDF_MARGINS = 72  # points
 DEFAULT_LINE_HEIGHT = 14  # points
 DEFAULT_OCR_LANGUAGE = "snd"
 SUPPORTED_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"]
+SYSTEM_PROMPT = "You are a meticulous literary translator."
 
 # Logger setup
 _LOGGER = logging.getLogger(__name__)
@@ -172,7 +173,7 @@ class TranslationService:
     
     def translate_chunks(self, chunks: List[str]) -> List[str]:
         """Translate multiple text chunks."""
-        translated = []
+        translated: List[str] = []
         
         for index, chunk in enumerate(chunks, start=1):
             if not chunk.strip():
@@ -191,12 +192,12 @@ class TranslationService:
         
         try:
             response = self.client.responses.create(**request_params)
-            translated_text = getattr(response, "output_text", None)
+            translated_text = self._extract_output_text(response)
             
             if not translated_text:
                 raise RuntimeError(f"Empty translation for chunk {chunk_index}")
             
-            return translated_text.strip()
+            return translated_text
             
         except Exception as exc:
             _LOGGER.error("Translation failed for chunk %d: %s", chunk_index, exc)
@@ -216,8 +217,14 @@ class TranslationService:
         params = {
             "model": self.settings.model,
             "input": [
-                {"role": "system", "content": "You are a meticulous literary translator."},
-                {"role": "user", "content": prompt},
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": SYSTEM_PROMPT}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                },
             ],
             "max_output_tokens": self.settings.max_output_tokens,
         }
@@ -229,6 +236,25 @@ class TranslationService:
             params["reasoning"] = {"effort": self.settings.reasoning_effort}
         
         return params
+
+    @staticmethod
+    def _extract_output_text(response: Any) -> str:
+        """Return concatenated assistant text from a Responses API response."""
+        output_text = getattr(response, "output_text", "")
+        if output_text:
+            return output_text.strip()
+
+        texts: List[str] = []
+        for output in getattr(response, "output", []) or []:
+            if getattr(output, "type", None) != "message":
+                continue
+            for content in getattr(output, "content", []) or []:
+                if getattr(content, "type", None) == "output_text":
+                    text_segment = getattr(content, "text", "")
+                    if text_segment:
+                        texts.append(str(text_segment))
+
+        return "".join(texts).strip()
 
 
 class OutputWriter:

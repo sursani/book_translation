@@ -159,9 +159,16 @@ def translate_batch(
     combined_text = "\n\n".join(filter(None, page_texts)).strip()
 
     if not combined_text:
-        raise RuntimeError(
-            f"No extractable text found for pages {batch.start_page}-{batch.end_page}."
+        _LOGGER.warning(
+            "Batch %d (%d-%d) produced no extractable text; writing blank output",
+            batch.batch_id,
+            batch.start_page,
+            batch.end_page,
         )
+        tmp_path = settings.tmp_dir / f"batch_{batch.batch_id:04d}.txt"
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text("", encoding="utf-8")
+        return tmp_path
 
     chunks = list(
         TextChunker.chunk_text(
@@ -218,14 +225,27 @@ def gather_batch_outputs(batch_paths: Sequence[Tuple[BatchRange, Path]]) -> str:
     """Combine ordered batch outputs into a single translation string."""
     sorted_batches = sorted(batch_paths, key=lambda item: item[0].start_page)
     texts: List[str] = []
+    has_content = False
     for batch, path in sorted_batches:
         text = path.read_text(encoding="utf-8").strip()
         if not text:
-            raise RuntimeError(
-                f"Temporary output for pages {batch.start_page}-{batch.end_page} was empty."
+            _LOGGER.warning(
+                "Merged output skipping empty batch %d (%d-%d)",
+                batch.batch_id,
+                batch.start_page,
+                batch.end_page,
             )
+            texts.append("")
+            continue
+        has_content = True
         texts.append(text)
-    return "\n\n".join(texts).strip()
+
+    merged = "\n\n".join(filter(None, texts)).strip()
+
+    if not has_content:
+        raise RuntimeError("Translation produced no content across all batches.")
+
+    return merged
 
 
 def cleanup_temporary_files(batch_paths: Sequence[Tuple[BatchRange, Path]]) -> None:
