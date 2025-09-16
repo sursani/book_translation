@@ -53,7 +53,7 @@ python src/translate_improved.py \
   --max-pages 2 \
   --chunk-chars 2000 \
   --chunk-overlap 200 \
-  --model gpt-5-high-reasoning \
+  --model gpt-5 \
   --temperature 0.2 \
   --max-output-tokens 4096 \
   --reasoning-effort high
@@ -73,6 +73,14 @@ Notes:
 - If you decide to re-run only the newly added pages, delete or archive the previous output first so you don’t confuse versions.
 - When using reasoning-optional models such as `gpt-4.1-mini`, pass `--model gpt-4.1-mini --reasoning-effort none` to avoid unsupported parameter errors.
 
+### Parallel translation
+- Use `python src/translate_parallel.py` to split the book into page batches and translate them concurrently.
+- Tune `--pages-per-job` and `--workers` to balance throughput against API rate limits; start with two workers and a handful of pages each.
+- Set `--min-request-interval` (e.g. `0.5`) when you need extra spacing between requests to satisfy OpenAI quotas.
+- Intermediate batch files live in `data/tmp/parallel`; they are deleted automatically unless `--keep-tmp` is provided.
+- The script reuses the same chunking, OCR, and output pipeline as `translate_improved.py`, so all other flags behave identically.
+
+
 ## What the Script Does
 1. Extracts text from the first N pages (configurable with `--max-pages`).
 2. Chunks the text with controlled overlap to fit model limits.
@@ -85,7 +93,8 @@ book_translation/
 ├── README.md
 ├── requirements.txt
 ├── src/
-│   └── translate_improved.py
+│   ├── translate_improved.py
+│   └── translate_parallel.py
 ├── venv/                 # Created locally; not committed
 └── <your source PDF files>
 ```

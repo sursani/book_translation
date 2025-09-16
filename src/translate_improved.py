@@ -335,7 +335,7 @@ def parse_arguments() -> TranslationSettings:
     parser.add_argument(
         "--model",
         type=str,
-        default="gpt-5-high-reasoning",
+        default="gpt-5",
         help="OpenAI model to use for translation"
     )
     
