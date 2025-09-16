@@ -219,11 +219,11 @@ class TranslationService:
             "input": [
                 {
                     "role": "system",
-                    "content": [{"type": "text", "text": SYSTEM_PROMPT}],
+                    "content": [{"type": "input_text", "text": SYSTEM_PROMPT}],
                 },
                 {
                     "role": "user",
-                    "content": [{"type": "text", "text": prompt}],
+                    "content": [{"type": "input_text", "text": prompt}],
                 },
             ],
             "max_output_tokens": self.settings.max_output_tokens,
