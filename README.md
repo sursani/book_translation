@@ -64,6 +64,13 @@ Notes:
 - Set `--reasoning-effort none` when using non-reasoning models.
 - Output is written as PDF if `--output` ends with `.pdf`; otherwise a UTF‑8 `.txt` file is written.
 
+### Translating additional pages
+- The script always starts at page 1 and processes as many pages as you specify with `--max-pages`. Increase the value to cover a larger portion of the book (e.g. `--max-pages 10` for the first ten pages).
+- To translate the complete PDF in one pass, set `--max-pages 0`. The extractor will iterate through every page while chunking the text to fit model limits.
+- For very long books you can run the script multiple times, saving each run to a different output file (`--output data/output/part1.txt`, `part2.txt`, etc.) with progressively larger `--max-pages` values so you keep checkpoints.
+- If you decide to re-run only the newly added pages, delete or archive the previous output first so you don’t confuse versions.
+- When using reasoning-optional models such as `gpt-4.1-mini`, pass `--model gpt-4.1-mini --reasoning-effort none` to avoid unsupported parameter errors.
+
 ## What the Script Does
 1. Extracts text from the first N pages (configurable with `--max-pages`).
 2. Chunks the text with controlled overlap to fit model limits.
