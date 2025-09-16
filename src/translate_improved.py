@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Iterator, List, Optional, Dict, Any
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, APIStatusError
 from pypdf import PdfReader
 from pdf2image import convert_from_path
 import pytesseract
@@ -196,8 +196,24 @@ class TranslationService:
         for attempt in range(1, max_attempts + 1):
             try:
                 response = self.client.responses.create(**params)
+            except APIStatusError as exc:
+                error_context = self._format_api_status_error(exc)
+                _LOGGER.error(
+                    "Translation failed for chunk %d (attempt %d/%d): %s",
+                    chunk_index,
+                    attempt,
+                    max_attempts,
+                    error_context,
+                )
+                raise RuntimeError(f"Translation failed for chunk {chunk_index}") from exc
             except Exception as exc:
-                _LOGGER.error("Translation failed for chunk %d: %s", chunk_index, exc)
+                _LOGGER.error(
+                    "Translation failed for chunk %d (attempt %d/%d): %s",
+                    chunk_index,
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
                 raise RuntimeError(f"Translation failed for chunk {chunk_index}") from exc
 
             translated_text = self._extract_output_text(response)
@@ -314,6 +330,78 @@ class TranslationService:
             return None
 
         return new_limit
+
+    @staticmethod
+    def _format_api_status_error(exc: APIStatusError) -> str:
+        """Return a concise string describing API 4xx/5xx responses."""
+        details: List[str] = []
+
+        status_code = getattr(exc, "status_code", None)
+        if status_code is not None:
+            details.append(f"status={status_code}")
+
+        request_id = getattr(exc, "request_id", None)
+        if request_id:
+            details.append(f"request_id={request_id}")
+
+        response = getattr(exc, "response", None)
+        body_summary = TranslationService._summarize_response_body(response)
+        if body_summary:
+            details.append(body_summary)
+
+        if not details:
+            details.append(str(exc))
+
+        return ", ".join(details)
+
+    @staticmethod
+    def _summarize_response_body(response: Any) -> Optional[str]:
+        """Extract meaningful error message details from an httpx response."""
+        if response is None:
+            return None
+
+        body: Any
+        try:
+            body = response.json()
+        except Exception:
+            try:
+                body = response.text
+            except Exception:
+                body = None
+
+        if isinstance(body, dict):
+            error = body.get("error") or body
+            if isinstance(error, dict):
+                parts = []
+                message = error.get("message")
+                if message:
+                    parts.append(f"message={TranslationService._trim_text(message)}")
+                code = error.get("code")
+                if code:
+                    parts.append(f"code={code}")
+                error_type = error.get("type")
+                if error_type:
+                    parts.append(f"type={error_type}")
+                param = error.get("param")
+                if param:
+                    parts.append(f"param={param}")
+                if parts:
+                    return ", ".join(parts)
+
+        if body:
+            text = TranslationService._trim_text(str(body))
+            if text:
+                return f"body={text}"
+
+        return None
+
+    @staticmethod
+    def _trim_text(text: str, limit: int = 500) -> str:
+        """Trim whitespace and collapse multiline error messages."""
+        compact = " ".join(text.split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 3] + "..."
 
 
 class OutputWriter:
