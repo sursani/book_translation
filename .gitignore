@@ -22,3 +22,6 @@ venv/
 # Temporary files
 *.tmp
 *.temp
+
+# Translation artifacts
+data/

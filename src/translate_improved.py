@@ -45,11 +45,12 @@ class TranslationSettings:
     """Configuration for the translation process."""
     pdf_path: Path
     output_path: Path
+    start_page: int
     max_pages: int
     chunk_chars: int
     chunk_overlap: int
     model: str
-    temperature: float
+    temperature: Optional[float]
     max_output_tokens: int
     reasoning_effort: str
     
@@ -61,7 +62,9 @@ class TranslationSettings:
             raise ValueError("chunk_overlap cannot be negative")
         if self.chunk_overlap >= self.chunk_chars:
             raise ValueError("chunk_overlap must be less than chunk_chars")
-        if self.temperature < 0 or self.temperature > 2:
+        if self.start_page <= 0:
+            raise ValueError("start_page must be 1 or greater")
+        if self.temperature is not None and (self.temperature < 0 or self.temperature > 2):
             raise ValueError("temperature must be between 0 and 2")
         if self.max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive")
@@ -75,14 +78,24 @@ class PDFExtractor:
     def __init__(self, ocr_lang: str = DEFAULT_OCR_LANGUAGE):
         self.ocr_lang = ocr_lang
     
-    def extract_pages(self, pdf_path: Path, max_pages: int) -> List[str]:
+    def extract_pages(self, pdf_path: Path, start_page: int, max_pages: int) -> List[str]:
         """Extract text from PDF pages, using OCR if necessary."""
         reader = PdfReader(str(pdf_path))
         texts: List[str] = []
         total_pages = len(reader.pages)
-        limit = min(max_pages, total_pages) if max_pages > 0 else total_pages
-        
-        for index in range(limit):
+        start_index = max(0, start_page - 1)
+
+        if start_index >= total_pages:
+            raise ValueError(
+                f"start_page {start_page} is beyond the total page count ({total_pages})."
+            )
+
+        if max_pages > 0:
+            end_index = min(total_pages, start_index + max_pages)
+        else:
+            end_index = total_pages
+
+        for index in range(start_index, end_index):
             page = reader.pages[index]
             text = (page.extract_text() or "").strip()
 
@@ -206,10 +219,12 @@ class TranslationService:
                 {"role": "system", "content": "You are a meticulous literary translator."},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": self.settings.temperature,
             "max_output_tokens": self.settings.max_output_tokens,
         }
-        
+
+        if self.settings.temperature is not None:
+            params["temperature"] = self.settings.temperature
+
         if self.settings.reasoning_effort != "none":
             params["reasoning"] = {"effort": self.settings.reasoning_effort}
         
@@ -288,7 +303,14 @@ def parse_arguments() -> TranslationSettings:
         default=Path("data/output/translation.pdf"),
         help="Output path for translated content (PDF or TXT)"
     )
-    
+
+    parser.add_argument(
+        "--start-page",
+        type=int,
+        default=1,
+        help="First page number to translate (1-indexed)"
+    )
+
     parser.add_argument(
         "--max-pages",
         type=int,
@@ -320,7 +342,7 @@ def parse_arguments() -> TranslationSettings:
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.2,
+        default=None,
         help="Sampling temperature (0-2)"
     )
     
@@ -344,6 +366,7 @@ def parse_arguments() -> TranslationSettings:
     settings = TranslationSettings(
         pdf_path=args.pdf_path,
         output_path=args.output_path,
+        start_page=args.start_page,
         max_pages=args.max_pages,
         chunk_chars=args.chunk_chars,
         chunk_overlap=args.chunk_overlap,
@@ -375,9 +398,18 @@ def main() -> None:
             raise FileNotFoundError(f"Source PDF not found: {settings.pdf_path}")
         
         # Extract text from PDF
-        _LOGGER.info("Extracting text from %s", settings.pdf_path.name)
+        _LOGGER.info(
+            "Extracting text from %s (start page %d, max pages %s)",
+            settings.pdf_path.name,
+            settings.start_page,
+            "all" if settings.max_pages == 0 else settings.max_pages,
+        )
         extractor = PDFExtractor()
-        page_texts = extractor.extract_pages(settings.pdf_path, settings.max_pages)
+        page_texts = extractor.extract_pages(
+            settings.pdf_path,
+            settings.start_page,
+            settings.max_pages,
+        )
         
         # Combine and validate extracted text
         combined_text = "\n\n".join(filter(None, page_texts)).strip()

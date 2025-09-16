@@ -49,6 +49,7 @@ Run the improved translation script:
 python src/translate_improved.py \
   --pdf "/absolute/path/to/source.pdf" \
   --output data/output/translation.pdf \
+  --start-page 1 \
   --max-pages 2 \
   --chunk-chars 2000 \
   --chunk-overlap 200 \
@@ -63,9 +64,10 @@ Notes:
 - The script attempts normal PDF text extraction first; if a page has no selectable text, it falls back to OCR (requires Tesseract and `snd` language data).
 - Set `--reasoning-effort none` when using non-reasoning models.
 - Output is written as PDF if `--output` ends with `.pdf`; otherwise a UTF‑8 `.txt` file is written.
+- `--start-page` is 1-indexed; the default of `1` begins at the front of the book.
 
 ### Translating additional pages
-- The script always starts at page 1 and processes as many pages as you specify with `--max-pages`. Increase the value to cover a larger portion of the book (e.g. `--max-pages 10` for the first ten pages).
+- Combine `--start-page` and `--max-pages` to control the range. For example, `--start-page 6 --max-pages 5` will translate pages 6 through 10.
 - To translate the complete PDF in one pass, set `--max-pages 0`. The extractor will iterate through every page while chunking the text to fit model limits.
 - For very long books you can run the script multiple times, saving each run to a different output file (`--output data/output/part1.txt`, `part2.txt`, etc.) with progressively larger `--max-pages` values so you keep checkpoints.
 - If you decide to re-run only the newly added pages, delete or archive the previous output first so you don’t confuse versions.
