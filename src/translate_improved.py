@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+"""Improved translation smoke-test for Sindhi to English PDF translation.
+
+This script demonstrates the end-to-end flow for translating the first few
+pages of a Sindhi PDF: text extraction (with optional OCR fallback), chunking,
+translation through the OpenAI Responses API, and a simple PDF/text export of
+the translated output.
+
+Requirements (install via pip):
+    python-dotenv, openai>=1.13, pypdf, pdf2image, pytesseract, reportlab
+
+External dependency:
+    Tesseract OCR binary must be available on PATH for pytesseract to work.
+"""
+
+import argparse
+import logging
+import os
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator, List, Optional, Dict, Any
+
+from dotenv import load_dotenv
+from openai import OpenAI
+from pypdf import PdfReader
+from pdf2image import convert_from_path
+import pytesseract
+from reportlab.lib.pagesizes import LETTER
+from reportlab.pdfgen import canvas
+
+
+# Constants
+DEFAULT_PDF_MARGINS = 72  # points
+DEFAULT_LINE_HEIGHT = 14  # points
+DEFAULT_OCR_LANGUAGE = "snd"
+SUPPORTED_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"]
+
+# Logger setup
+_LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class TranslationSettings:
+    """Configuration for the translation process."""
+    pdf_path: Path
+    output_path: Path
+    max_pages: int
+    chunk_chars: int
+    chunk_overlap: int
+    model: str
+    temperature: float
+    max_output_tokens: int
+    reasoning_effort: str
+    
+    def validate(self) -> None:
+        """Validate settings and raise ValueError if invalid."""
+        if self.chunk_chars <= 0:
+            raise ValueError("chunk_chars must be positive")
+        if self.chunk_overlap < 0:
+            raise ValueError("chunk_overlap cannot be negative")
+        if self.chunk_overlap >= self.chunk_chars:
+            raise ValueError("chunk_overlap must be less than chunk_chars")
+        if self.temperature < 0 or self.temperature > 2:
+            raise ValueError("temperature must be between 0 and 2")
+        if self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
+        if self.reasoning_effort not in SUPPORTED_REASONING_EFFORTS:
+            raise ValueError(f"reasoning_effort must be one of {SUPPORTED_REASONING_EFFORTS}")
+
+
+class PDFExtractor:
+    """Handles PDF text extraction with OCR fallback."""
+    
+    def __init__(self, ocr_lang: str = DEFAULT_OCR_LANGUAGE):
+        self.ocr_lang = ocr_lang
+    
+    def extract_pages(self, pdf_path: Path, max_pages: int) -> List[str]:
+        """Extract text from PDF pages, using OCR if necessary."""
+        reader = PdfReader(str(pdf_path))
+        texts: List[str] = []
+        total_pages = len(reader.pages)
+        limit = min(max_pages, total_pages) if max_pages > 0 else total_pages
+        
+        for index in range(limit):
+            page = reader.pages[index]
+            text = (page.extract_text() or "").strip()
+            
+            if text:
+                texts.append(text)
+            else:
+                texts.append(self._extract_with_ocr(pdf_path, index))
+        
+        return texts
+    
+    def _extract_with_ocr(self, pdf_path: Path, page_index: int) -> str:
+        """Extract text from a single page using OCR."""
+        _LOGGER.info("Running OCR on page %d", page_index + 1)
+        
+        images = convert_from_path(
+            str(pdf_path),
+            fmt="png",
+            first_page=page_index + 1,
+            last_page=page_index + 1,
+            dpi=300,
+        )
+        
+        ocr_texts = []
+        for image in images:
+            ocr_text = pytesseract.image_to_string(image, lang=self.ocr_lang)
+            ocr_texts.append(ocr_text)
+        
+        return "\n".join(ocr_texts).strip()
+
+
+class TextChunker:
+    """Handles text chunking for API calls."""
+    
+    @staticmethod
+    def chunk_text(text: str, chunk_chars: int, overlap: int) -> Iterator[str]:
+        """Yield overlapping character-based chunks."""
+        if not text:
+            return
+            
+        position = 0
+        length = len(text)
+        step = max(1, chunk_chars - max(0, overlap))
+        
+        while position < length:
+            end = min(length, position + chunk_chars)
+            yield text[position:end]
+            position += step
+
+
+class TranslationService:
+    """Handles translation via OpenAI API."""
+    
+    def __init__(self, client: OpenAI, settings: TranslationSettings):
+        self.client = client
+        self.settings = settings
+    
+    def translate_chunks(self, chunks: List[str]) -> List[str]:
+        """Translate multiple text chunks."""
+        translated = []
+        
+        for index, chunk in enumerate(chunks, start=1):
+            if not chunk.strip():
+                continue
+                
+            _LOGGER.info("Translating chunk %d of %d", index, len(chunks))
+            translated_text = self._translate_single_chunk(chunk, index)
+            translated.append(translated_text)
+        
+        return translated
+    
+    def _translate_single_chunk(self, chunk: str, chunk_index: int) -> str:
+        """Translate a single chunk of text."""
+        prompt = self._create_translation_prompt(chunk)
+        request_params = self._build_request_params(prompt)
+        
+        try:
+            response = self.client.responses.create(**request_params)
+            translated_text = getattr(response, "output_text", None)
+            
+            if not translated_text:
+                raise RuntimeError(f"Empty translation for chunk {chunk_index}")
+            
+            return translated_text.strip()
+            
+        except Exception as exc:
+            _LOGGER.error("Translation failed for chunk %d: %s", chunk_index, exc)
+            raise RuntimeError(f"Translation failed for chunk {chunk_index}") from exc
+    
+    def _create_translation_prompt(self, text: str) -> str:
+        """Create the translation prompt."""
+        return (
+            "Translate the following Sindhi text into fluent English. "
+            "Preserve names, cultural nuances, and paragraph breaks.\n\n"
+            + text.strip()
+        )
+    
+    def _build_request_params(self, prompt: str) -> Dict[str, Any]:
+        """Build parameters for the API request."""
+        params = {
+            "model": self.settings.model,
+            "input": [
+                {"role": "system", "content": "You are a meticulous literary translator."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": self.settings.temperature,
+            "max_output_tokens": self.settings.max_output_tokens,
+        }
+        
+        if self.settings.reasoning_effort != "none":
+            params["reasoning"] = {"effort": self.settings.reasoning_effort}
+        
+        return params
+
+
+class OutputWriter:
+    """Handles writing output to PDF or text files."""
+    
+    @staticmethod
+    def write(text: str, destination: Path) -> Path:
+        """Write text to the specified destination."""
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        
+        if destination.suffix.lower() == ".pdf":
+            return OutputWriter._write_pdf(text, destination)
+        else:
+            return OutputWriter._write_text(text, destination)
+    
+    @staticmethod
+    def _write_pdf(text: str, destination: Path) -> Path:
+        """Write text to PDF."""
+        pdf = canvas.Canvas(str(destination), pagesize=LETTER)
+        width, height = LETTER
+        x_margin = DEFAULT_PDF_MARGINS
+        y_margin = DEFAULT_PDF_MARGINS
+        y_position = height - y_margin
+        
+        for line in text.splitlines():
+            if y_position < y_margin:
+                pdf.showPage()
+                y_position = height - y_margin
+            
+            pdf.drawString(x_margin, y_position, line)
+            y_position -= DEFAULT_LINE_HEIGHT
+        
+        pdf.save()
+        return destination
+    
+    @staticmethod
+    def _write_text(text: str, destination: Path) -> Path:
+        """Write text to a UTF-8 text file."""
+        destination.write_text(text, encoding="utf-8")
+        return destination
+
+
+def load_environment() -> None:
+    """Load environment variables and validate required settings."""
+    load_dotenv(override=False)
+    
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError(
+            "OPENAI_API_KEY not found. Please set it in .env or as an environment variable."
+        )
+
+
+def parse_arguments() -> TranslationSettings:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Translate Sindhi PDF to English using OpenAI API",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    parser.add_argument(
+        "--pdf",
+        dest="pdf_path",
+        type=Path,
+        required=True,
+        help="Path to the source Sindhi PDF"
+    )
+    
+    parser.add_argument(
+        "--output",
+        dest="output_path",
+        type=Path,
+        default=Path("data/output/translation.pdf"),
+        help="Output path for translated content (PDF or TXT)"
+    )
+    
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=2,
+        help="Maximum number of pages to translate (0 for all)"
+    )
+    
+    parser.add_argument(
+        "--chunk-chars",
+        type=int,
+        default=2000,
+        help="Maximum characters per translation chunk"
+    )
+    
+    parser.add_argument(
+        "--chunk-overlap",
+        type=int,
+        default=200,
+        help="Overlap between consecutive chunks"
+    )
+    
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="gpt-5-high-reasoning",
+        help="OpenAI model to use for translation"
+    )
+    
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.2,
+        help="Sampling temperature (0-2)"
+    )
+    
+    parser.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=4096,
+        help="Maximum tokens to generate per chunk"
+    )
+    
+    parser.add_argument(
+        "--reasoning-effort",
+        type=str,
+        choices=SUPPORTED_REASONING_EFFORTS,
+        default="high",
+        help="Reasoning effort level for capable models"
+    )
+    
+    args = parser.parse_args()
+    
+    settings = TranslationSettings(
+        pdf_path=args.pdf_path,
+        output_path=args.output_path,
+        max_pages=args.max_pages,
+        chunk_chars=args.chunk_chars,
+        chunk_overlap=args.chunk_overlap,
+        model=args.model,
+        temperature=args.temperature,
+        max_output_tokens=args.max_output_tokens,
+        reasoning_effort=args.reasoning_effort
+    )
+    
+    settings.validate()
+    return settings
+
+
+def main() -> None:
+    """Main entry point for the translation script."""
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    
+    try:
+        # Parse arguments first so --help and validation work without API key
+        settings = parse_arguments()
+        load_environment()
+        
+        # Validate input file exists
+        if not settings.pdf_path.exists():
+            raise FileNotFoundError(f"Source PDF not found: {settings.pdf_path}")
+        
+        # Extract text from PDF
+        _LOGGER.info("Extracting text from %s", settings.pdf_path.name)
+        extractor = PDFExtractor()
+        page_texts = extractor.extract_pages(settings.pdf_path, settings.max_pages)
+        
+        # Combine and validate extracted text
+        combined_text = "\n\n".join(filter(None, page_texts)).strip()
+        if not combined_text:
+            raise RuntimeError("No extractable text found in the PDF.")
+        
+        _LOGGER.info("Extracted %d characters of text", len(combined_text))
+        
+        # Chunk the text
+        chunks = list(TextChunker.chunk_text(
+            combined_text, 
+            settings.chunk_chars, 
+            settings.chunk_overlap
+        ))
+        _LOGGER.info("Created %d chunks for translation", len(chunks))
+        
+        # Translate chunks
+        client = OpenAI()
+        translator = TranslationService(client, settings)
+        translations = translator.translate_chunks(chunks)
+        
+        # Combine translations
+        full_translation = "\n\n".join(translations).strip()
+        if not full_translation:
+            raise RuntimeError("Translation resulted in empty output.")
+        
+        # Write output
+        output_path = OutputWriter.write(full_translation, settings.output_path)
+        _LOGGER.info("Successfully wrote translation to %s", output_path)
+        
+    except Exception as exc:
+        _LOGGER.error("Translation failed: %s", exc)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

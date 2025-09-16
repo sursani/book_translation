@@ -1,0 +1,7 @@
+# Dependencies for src/translate_improved.py only
+python-dotenv
+openai>=1.13
+pypdf
+pdf2image
+pytesseract
+reportlab
