@@ -36,6 +36,7 @@ DEFAULT_LINE_HEIGHT = 14  # points
 DEFAULT_OCR_LANGUAGE = "snd"
 SUPPORTED_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"]
 SYSTEM_PROMPT = "You are a meticulous literary translator."
+MAX_REASONING_RETRY_TOKENS = 16384
 
 # Logger setup
 _LOGGER = logging.getLogger(__name__)
@@ -189,20 +190,34 @@ class TranslationService:
         """Translate a single chunk of text."""
         prompt = self._create_translation_prompt(chunk)
         request_params = self._build_request_params(prompt)
-        
-        try:
-            response = self.client.responses.create(**request_params)
+        params: Dict[str, Any] = dict(request_params)
+
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = self.client.responses.create(**params)
+            except Exception as exc:
+                _LOGGER.error("Translation failed for chunk %d: %s", chunk_index, exc)
+                raise RuntimeError(f"Translation failed for chunk {chunk_index}") from exc
+
             translated_text = self._extract_output_text(response)
-            
-            if not translated_text:
-                raise RuntimeError(f"Empty translation for chunk {chunk_index}")
-            
-            return translated_text
-            
-        except Exception as exc:
-            _LOGGER.error("Translation failed for chunk %d: %s", chunk_index, exc)
-            raise RuntimeError(f"Translation failed for chunk {chunk_index}") from exc
-    
+            if translated_text:
+                return translated_text
+
+            retry_tokens = self._next_retry_tokens(params, response)
+            if retry_tokens and attempt < max_attempts:
+                _LOGGER.warning(
+                    "Chunk %d used all %d tokens on reasoning; retrying with max_output_tokens=%d",
+                    chunk_index,
+                    params.get("max_output_tokens"),
+                    retry_tokens,
+                )
+                params["max_output_tokens"] = retry_tokens
+                continue
+
+            self._log_empty_response(chunk_index, response)
+            raise RuntimeError(f"Empty translation for chunk {chunk_index}")
+
     def _create_translation_prompt(self, text: str) -> str:
         """Create the translation prompt."""
         return (
@@ -234,7 +249,7 @@ class TranslationService:
 
         if self.settings.reasoning_effort != "none":
             params["reasoning"] = {"effort": self.settings.reasoning_effort}
-        
+
         return params
 
     @staticmethod
@@ -255,6 +270,50 @@ class TranslationService:
                         texts.append(str(text_segment))
 
         return "".join(texts).strip()
+
+    @staticmethod
+    def _log_empty_response(chunk_index: int, response: Any) -> None:
+        dumped = getattr(response, "model_dump", None)
+        raw_dump = dumped() if callable(dumped) else str(response)
+        response_dump = str(raw_dump)[:2000]
+        _LOGGER.error(
+            "Empty translation for chunk %d. Raw response: %s",
+            chunk_index,
+            response_dump,
+        )
+
+    @staticmethod
+    def _next_retry_tokens(params: Dict[str, Any], response: Any) -> Optional[int]:
+        requested_tokens = params.get("max_output_tokens")
+        if not isinstance(requested_tokens, int):
+            return None
+
+        if requested_tokens >= MAX_REASONING_RETRY_TOKENS:
+            return None
+
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return None
+
+        output_tokens = getattr(usage, "output_tokens", None)
+        details = getattr(usage, "output_tokens_details", None)
+        reasoning_tokens = getattr(details, "reasoning_tokens", None) if details else None
+
+        if not isinstance(output_tokens, int) or not isinstance(reasoning_tokens, int):
+            return None
+
+        if reasoning_tokens < requested_tokens:
+            return None
+
+        new_limit = min(
+            MAX_REASONING_RETRY_TOKENS,
+            max(requested_tokens * 2, requested_tokens + 1024),
+        )
+
+        if new_limit <= requested_tokens:
+            return None
+
+        return new_limit
 
 
 class OutputWriter:
@@ -375,7 +434,7 @@ def parse_arguments() -> TranslationSettings:
     parser.add_argument(
         "--max-output-tokens",
         type=int,
-        default=4096,
+        default=12000,
         help="Maximum tokens to generate per chunk"
     )
     

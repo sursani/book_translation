@@ -289,7 +289,7 @@ def parse_arguments() -> ParallelTranslationSettings:
     parser.add_argument(
         "--max-output-tokens",
         type=int,
-        default=4096,
+        default=12000,
         help="Maximum tokens to generate per chunk",
     )
     parser.add_argument(
