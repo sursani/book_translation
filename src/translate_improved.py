@@ -85,13 +85,31 @@ class PDFExtractor:
         for index in range(limit):
             page = reader.pages[index]
             text = (page.extract_text() or "").strip()
-            
-            if text:
-                texts.append(text)
-            else:
-                texts.append(self._extract_with_ocr(pdf_path, index))
-        
+
+            if not self._contains_target_script(text):
+                # Fallback to OCR when extraction misses Sindhi characters
+                text = self._extract_with_ocr(pdf_path, index)
+
+            texts.append(text)
+
         return texts
+
+    @staticmethod
+    def _contains_target_script(text: str) -> bool:
+        """Check if the text already includes Sindhi/Arabic characters."""
+        if not text:
+            return False
+
+        for char in text:
+            code = ord(char)
+            if (
+                0x0600 <= code <= 0x06FF  # Arabic block
+                or 0x0750 <= code <= 0x077F  # Arabic Supplement
+                or 0x08A0 <= code <= 0x08FF  # Arabic Extended-A
+            ):
+                return True
+
+        return False
     
     def _extract_with_ocr(self, pdf_path: Path, page_index: int) -> str:
         """Extract text from a single page using OCR."""
@@ -175,7 +193,8 @@ class TranslationService:
         """Create the translation prompt."""
         return (
             "Translate the following Sindhi text into fluent English. "
-            "Preserve names, cultural nuances, and paragraph breaks.\n\n"
+            "Preserve names, cultural nuances, and paragraph breaks. "
+            "Whenever the Sindhi surname عرساڻي appears, transliterate it as 'Ursani'.\n\n"
             + text.strip()
         )
     
