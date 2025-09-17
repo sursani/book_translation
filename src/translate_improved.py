@@ -37,6 +37,12 @@ DEFAULT_OCR_LANGUAGE = "snd"
 SUPPORTED_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"]
 SYSTEM_PROMPT = "You are a meticulous literary translator."
 MAX_REASONING_RETRY_TOKENS = 16384
+REASONING_BACKOFF = {
+    "high": "medium",
+    "medium": "low",
+    "low": "minimal",
+    "minimal": "none",
+}
 
 # Logger setup
 _LOGGER = logging.getLogger(__name__)
@@ -231,6 +237,22 @@ class TranslationService:
                 params["max_output_tokens"] = retry_tokens
                 continue
 
+            if attempt < max_attempts:
+                downgraded = self._downgrade_reasoning(params)
+                if downgraded is not None:
+                    if downgraded == "none":
+                        _LOGGER.warning(
+                            "Chunk %d still empty; retrying without reasoning",
+                            chunk_index,
+                        )
+                    else:
+                        _LOGGER.warning(
+                            "Chunk %d still empty; lowering reasoning effort to %s",
+                            chunk_index,
+                            downgraded,
+                        )
+                    continue
+
             self._log_empty_response(chunk_index, response)
             raise RuntimeError(f"Empty translation for chunk {chunk_index}")
 
@@ -330,6 +352,24 @@ class TranslationService:
             return None
 
         return new_limit
+
+    @staticmethod
+    def _downgrade_reasoning(params: Dict[str, Any]) -> Optional[str]:
+        reasoning = params.get("reasoning")
+        if not isinstance(reasoning, dict):
+            return None
+
+        effort = reasoning.get("effort")
+        next_effort = REASONING_BACKOFF.get(effort)
+        if next_effort is None:
+            return None
+
+        if next_effort == "none":
+            params.pop("reasoning", None)
+            return "none"
+
+        reasoning["effort"] = next_effort
+        return next_effort
 
     @staticmethod
     def _format_api_status_error(exc: APIStatusError) -> str:
